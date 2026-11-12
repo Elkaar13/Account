@@ -230,7 +230,7 @@ const r2=x=>Math.round((+x||0)*100)/100;
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2200)}
 
 /* ================= Données ================= */
-const DEF_SET={danger:0,vigilOn:false,vigil:300,revenuRef:0,colIn:'',colOut:'',colDanger:'',colVigil:'',hide:false,hideOnOpen:false,lastBackup:''};
+const DEF_SET={danger:0,vigilOn:false,vigil:300,revenuRef:0,colIn:'',colOut:'',colDanger:'',colVigil:'',hide:false,hideOnOpen:false,projBudgets:true,lastBackup:''};
 function blank(){return{v:2,settings:Object.assign({},DEF_SET),accounts:[],savings:[],recurring:[],loans:[],oneoffs:[],snapshots:[],overrides:{},categories:null}}
 function migrate(){
   const old=S.settings||{};
@@ -308,7 +308,10 @@ function monthEvents(ym){
     const o=ov(ym,r.id);const amt=o===undefined?num(r.amount):num(o);const ovd=o!==undefined;
     const date=dateIn(ym,r.day||1);
     const base={src:r.id,type:'rec',date,label:r.label,bucket:r.bucket,note:r.note,overridden:ovd};
-    if(r.kind==='enveloppe')continue; /* un budget est un prévisionnel : jamais débité */
+    if(r.kind==='enveloppe'){ /* mois en cours : jamais débité ; mois à venir : considéré comme dépensé (provision le 1er) */
+      if(ym<=cur||S.settings.projBudgets===false)continue;
+      const spent=S.oneoffs.filter(x=>x.env===r.id&&ymOf(x.date)===ym).reduce((s,x)=>s-num(x.amount),0);const rem=amt-spent;if(rem<=0)continue;
+      ev.push(Object.assign({},base,{id:r.id+ym+'p',kind:'provision',hidden:true,date:ym+'-01',label:'Provision '+r.label,amount:-rem,cat:r.daily?'Dépenses du quotidien':r.label}));continue}
     if(!amt)continue;
     if(r.kind==='charge')ev.push(Object.assign(base,{id:r.id+ym,kind:'charge',amount:-amt,cat:r.cat||'Divers'}));
     else if(r.kind==='revenu')ev.push(Object.assign(base,{id:r.id+ym,kind:'revenu',amount:amt,cat:'Revenus'}));
@@ -331,7 +334,7 @@ function monthEvents(ym){
   ev.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:(a.amount>b.amount?-1:1));
   return memo[ym]=ev;
 }
-function visibleEvents(list,sc){return list.filter(e=>scopeHas(sc,e.bucket)&&!(sc==='all'&&e.kind==='virement'&&e.amount>0))}
+function visibleEvents(list,sc,incHidden){return list.filter(e=>(incHidden||!e.hidden)&&scopeHas(sc,e.bucket)&&!(sc==='all'&&e.kind==='virement'&&e.amount>0))}
 
 /* ================= Soldes ================= */
 function snapFor(key,date){let best=null;for(const s of S.snapshots){if(s.date<=date&&s.values&&Object.prototype.hasOwnProperty.call(s.values,key)&&(!best||s.date>best.date))best=s}return best}
@@ -407,7 +410,11 @@ function monthsTxt(ms){if(!Array.isArray(ms)||ms.length!==12||ms.every(Boolean))
 function revenusMensuels(ym){if(num(S.settings.revenuRef)>0)return num(S.settings.revenuRef);return S.recurring.filter(r=>r.kind==='revenu'&&recActive(r,ym)).reduce((s,r)=>s+num(r.amount),0)}
 function mensualitesCredits(ym){return S.loans.filter(l=>loanActive(l,ym)).reduce((s,l)=>s+loanCalc(l).total,0)}
 
-function nextPay(T){const cur=ymOf(T);for(let i=0;i<3;i++){const e=monthEvents(addMonths(cur,i)).find(x=>x.kind==='revenu'&&x.date>T);if(e)return e.date}return null}
+function mainPayId(){const r=S.recurring.filter(x=>x.kind==='revenu').sort((a,b)=>num(b.amount)-num(a.amount))[0];return r?r.id:null}
+function payIn(ym){const id=mainPayId();const e=monthEvents(ym).find(x=>x.kind==='revenu'&&x.src===id);return e?e.date:null}
+function veille(ym){const p=payIn(ym);let d=p?addDays(p,-1):lastDay(ym);if(d<ym+'-01')d=ym+'-01';return d}
+const isTopup=sc=>sc!=='all'&&!!(S.accounts.find(a=>a.id===sc)||{}).topup;
+function nextPay(T){const cur=ymOf(T),id=mainPayId();for(let i=0;i<3;i++){const e=monthEvents(addMonths(cur,i)).find(x=>x.kind==='revenu'&&x.src===id&&x.date>T);if(e)return e.date}return null}
 function extremes(sc,from,to){let lo=null,hi=null,d=from,g=0;while(d<=to&&g++<400){const b=scopeBal(sc,d);if(!lo||b<lo.v-0.001)lo={v:b,d};if(!hi||b>hi.v+0.001)hi={v:b,d};d=addDays(d,1)}return{lo,hi}}
 const lvlCls=v=>{const l=level(v);return l==='ok'?'':l};
 function sortLabel(){return{jour:'Par jour / date',mdesc:'Montant décroissant',masc:'Montant croissant',cat:'Par catégorie',nom:'Par nom'}}
@@ -422,12 +429,15 @@ function viewHome(){
   if(!hasSnapshots())h+=`<div class="alert info">Saisis tes soldes bancaires actuels pour que les calculs partent de ta vraie situation. <button class="link" data-act="soldes">Saisir mes soldes →</button></div>`;
   let label,big,from,to;const pay=isCur?nextPay(T):null;
   if(isCur){from=T;to=pay?addDays(pay,-1):lastDay(cur);if(to<T)to=T;big=scopeBal(sc,T);label='Solde aujourd\'hui'}
-  else{from=ym+'-01';to=lastDay(ym);big=scopeBal(sc,to);label=isPast?'Solde fin de mois':'Solde prévu fin de mois'}
-  const ex=isPast?null:extremes(sc,from,to);
+  else if(isPast){from=ym+'-01';to=lastDay(ym);big=scopeBal(sc,to);label='Solde fin de mois'}
+  else{from=ym+'-01';to=veille(ym);big=scopeBal(sc,to);label=payIn(ym)?'Solde prévu la veille de la paye ('+fmtD(to)+')':'Solde prévu fin de mois'}
+  const topup=isTopup(sc);if(topup){big=scopeBal(sc,T);label='Solde aujourd\'hui'}
+  const ex=isPast||topup?null:extremes(sc,from,to);
   const lv=level(big);
   h+=`<div class="hero ${lv}"><button class="eye" data-act="eye" aria-label="Masquer les montants">${S.settings.hide?'👁':'🙈'}</button><div class="lbl">${label}${sc!=='all'?' · '+esc(bucketName(sc)):''}</div><div class="big">${money(big)}</div><div class="sub">`;
   if(ex){h+=`<span>Point haut : <b>${money(ex.hi.v)}</b> le ${fmtD(ex.hi.d)}</span><span>Point bas : <b>${money(ex.lo.v)}</b>${level(ex.lo.v)!=='ok'?' ⚠':''} le ${fmtD(ex.lo.d)}</span>`;
-    if(isCur)h+=`<span style="opacity:.85">Période : jusqu'au ${fmtD(to)}${pay?' (veille de la paye)':''}</span>`}
+    h+=`<span style="opacity:.85">Période : ${isCur?'aujourd\'hui':'du '+fmtD(from)} jusqu'au ${fmtD(to)}${(isCur?pay:payIn(ym))?' (veille de la paye)':''}</span>`}
+  if(topup)h+=`<span style="opacity:.85">Compte alimenté à la demande : pas de projection.</span>`;
   h+=`</div></div>`;
   if(ex){const ll=level(ex.lo.v);if(ll!=='ok'){const thr=ll==='danger'?num(S.settings.danger):num(S.settings.vigil);const z=ll==='danger'?'zone de danger':'zone de vigilance';
     h+=`<div class="alert ${ll}">⚠ ${ex.lo.d===from&&isCur?'Ton solde est en '+z:'Ton solde passera en '+z+' le <b>'+fmtDL(ex.lo.d)+'</b>'} (sous ${money(thr)}) : ${money(ex.lo.v)}.</div>`}}
@@ -440,8 +450,8 @@ function viewHome(){
   const refD=isCur?T:lastDay(ym);
   let acc=`<h2>Comptes ${isCur?'aujourd\'hui':'fin '+MOIS[mIdx(ym)].toLowerCase()}</h2><div class="list">`;
   S.accounts.filter(a=>sc==='all'||a.id===sc).forEach(a=>{
-    const tot=accBal(a.id,refD);
-    acc+=`<div class="row" data-act="scope" data-v="${a.id}"><div class="grow"><div class="t">${esc(a.name)}</div>${(a.subs||[]).length?`<div class="s">Principal ${money(bucketBal(a.id,refD))}${a.subs.map(s=>' · '+esc(s.name)+' '+money(bucketBal(a.id+'/'+s.id,refD))).join('')}</div>`:''}</div><div class="amt ${lvlCls(tot)}">${money(tot)}</div></div>`;
+    const tp=!!a.topup;const tot=accBal(a.id,tp?T:refD);
+    acc+=`<div class="row" data-act="scope" data-v="${a.id}"><div class="grow"><div class="t">${esc(a.name)}</div>${(a.subs||[]).length?`<div class="s">Principal ${money(bucketBal(a.id,refD))}${a.subs.map(s=>' · '+esc(s.name)+' '+money(bucketBal(a.id+'/'+s.id,refD))).join('')}</div>`:''}${tp?'<div class="s">alimenté à la demande · solde du jour</div>':''}</div><div class="amt ${tp?'':lvlCls(tot)}">${money(tot)}</div></div>`;
   });
   B.accounts=acc+`</div>`;
   const envs=S.recurring.filter(r=>r.kind==='enveloppe'&&!r.daily&&recActive(r,ym)&&scopeHas(sc,r.bucket));
@@ -451,16 +461,16 @@ function viewHome(){
     B.budgets=bh+`</div>`}
   let rp=`<h2>Répartition des sorties</h2><div class="card"><div class="seg" style="margin-bottom:12px"><button data-act="repmode" data-v="mois" class="${ui.repMode==='mois'?'on':''}">Ce mois</button><button data-act="repmode" data-v="an" class="${ui.repMode==='an'?'on':''}">Coût annuel</button></div>`;
   if(ui.repMode==='an'){
-    const g={};for(let i=0;i<12;i++)visibleEvents(monthEvents(addMonths(cur,i)),sc).filter(e=>e.amount<0&&e.kind!=='virement'&&e.kind!=='epargne').forEach(e=>{const k=groupKey(e);g[k]=(g[k]||0)-e.amount});
+    const g={};for(let i=0;i<12;i++)visibleEvents(monthEvents(addMonths(cur,i)),sc,true).filter(e=>e.amount<0&&e.kind!=='virement'&&e.kind!=='epargne').forEach(e=>{const k=groupKey(e);g[k]=(g[k]||0)-e.amount});
     const gl=Object.entries(g).map(([k,v])=>({k,v})).sort((a,b)=>b.v-a.v);const tot=gl.reduce((s,x)=>s+x.v,0);
-    rp+=donutHtml(gl,'Par an')+`<div style="margin-top:10px">${gl.map((x,i)=>`<div class="calcrow"><span><i style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${PAL[i%PAL.length]};margin-right:6px"></i>${esc(x.k)}</span><span><b>${money(x.v)}</b>/an · ${money(x.v/12)}/mois</span></div>`).join('')}<div class="calcrow total"><span>Total</span><span>${money(tot)}/an</span></div></div><small>Sur les 12 prochains mois, mois cochés compris. Virements et épargne exclus.</small>`;
+    rp+=donutHtml(gl,'Par an')+`<div style="margin-top:10px">${gl.map((x,i)=>`<div class="calcrow"><span><i style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${PAL[i%PAL.length]};margin-right:6px"></i>${esc(x.k)}</span><span><b>${money(x.v)}</b>/an · ${money(x.v/12)}/mois</span></div>`).join('')}<div class="calcrow total"><span>Total</span><span>${money(tot)}/an</span></div></div><small>Sur les 12 prochains mois, mois cochés et budgets compris. Virements et épargne exclus.</small>`;
   }else{
     const groups={};visibleEvents(monthEvents(ym),sc).filter(e=>e.amount<0&&!(sc==='all'&&e.kind==='virement')).forEach(e=>{const k=groupKey(e);groups[k]=(groups[k]||0)-e.amount});
     rp+=donutHtml(Object.entries(groups).map(([k,v])=>({k,v})).sort((a,b)=>b.v-a.v),'Sorties');
   }
   B.repart=rp+`</div>`;
-  const pm=[...Array(12)].map((_,i)=>addMonths(cur,i));const pv=pm.map(m=>scopeBal(sc,lastDay(m)));
-  B.proj=`<h2>Projection 12 mois (fin de mois)</h2><div class="card">${barsSvg(pv,pm.map(m=>MC[mIdx(m)]))}<small>Basée sur tes soldes saisis, tes lignes récurrentes, tes crédits, tes ponctuels prévus et tes dépenses de budget saisies. Les budgets eux-mêmes ne sont pas débités.</small></div>`;
+  const pm=[...Array(12)].map((_,i)=>addMonths(cur,i));const pv=pm.map(m=>scopeBal(sc,m===cur&&veille(m)<T?lastDay(m):veille(m)));
+  if(!topup)B.proj=`<h2>Projection 12 mois (veille de paye)</h2><div class="card">${barsSvg(pv,pm.map(m=>MC[mIdx(m)]))}<small>Basée sur tes soldes saisis, tes lignes récurrentes, tes crédits, tes ponctuels prévus et tes dépenses de budget saisies. Les budgets du mois en cours ne sont pas débités ; ceux des mois à venir sont comptés comme dépensés.</small></div>`;
   const rev=revenusMensuels(ym),cred=mensualitesCredits(ym);const te=rev?cred/rev*100:0;
   B.endet=`<h2>Taux d'endettement</h2><div class="card"><div class="grid2"><div class="kv"><span>Taux</span><b class="${te>35?'danger':''}" style="font-size:22px">${rev?te.toFixed(1).replace('.',',')+' %':'—'}</b></div><div class="kv"><span>Crédits / revenus</span><b>${money(cred)}</b><br><small style="margin:0">sur ${money(rev)}</small></div></div><small>Repère bancaire : 35 % maximum (assurance comprise). ${num(S.settings.revenuRef)>0?'Revenu de référence fixé dans Réglages.':'Calculé sur tes revenus récurrents.'}</small></div>`;
   const all=visibleEvents(monthEvents(ym),sc);
@@ -490,7 +500,7 @@ function viewCal(){
   let h=`${monthNav()}${scopeChips()}<div class="cal">${['L','M','M','J','V','S','D'].map(d=>`<div class="h">${d}</div>`).join('')}`;
   for(let i=0;i<off;i++)h+='<div></div>';
   for(let d=1;d<=n;d++){const ds=ym+'-'+pad(d);const de=evs.filter(e=>e.date===ds);const net=de.filter(e=>e.kind!=='virement'||ui.scope!=='all').reduce((s,e)=>s+e.amount,0);
-    const lv=ds>=T?level(scopeBal(ui.scope,ds)):'ok';
+    const lv=ds>=T&&!isTopup(ui.scope)?level(scopeBal(ui.scope,ds)):'ok';
     const dots=de.slice(0,6).map(e=>`<i style="background:var(--${e.kind==='virement'?'tr':e.amount>=0?'in':'out'});${e.forecast?'opacity:.4':''}"></i>`).join('');
     h+=`<div class="d ${ds===T?'today':''} ${ui.calDay===ds?'sel':''} ${lv==='danger'?'low':lv==='vigil'?'lowv':''}" data-act="calday" data-d="${ds}"><div class="n">${d}</div><div class="dots">${dots}</div>${de.length&&Math.abs(net)>=1?`<div class="x">${kmoney(net)}</div>`:''}</div>`}
   h+=`</div>`;
@@ -627,7 +637,7 @@ function viewSet(){
   const C=(k,l,def)=>`<label class="colrow"><span>${l}</span><input type="color" data-set="${k}" value="${st[k]||def}"></label>`;
   h+=`<h2>Confidentialité</h2><div class="card"><label class="colrow"><span>Ouvrir l'appli avec les montants masqués</span><input type="checkbox" data-set="hideOnOpen" ${st.hideOnOpen?'checked':''}></label><small>Les montants sont floutés à chaque ouverture. Touche 👁 pour les afficher, 🙈 pour les masquer.</small></div>
   <h2>Couleurs</h2><div class="card">${C('colIn','Versements / rentrées','#16a34a')}${C('colOut','Prélèvements / dépenses','#8a94a6')}${C('colDanger','Zone de danger','#dc2626')}${st.vigilOn?C('colVigil','Zone de vigilance','#d97706'):''}<button class="btn ghost sm" data-act="col-reset">Couleurs par défaut</button></div>`;
-  h+=`<h2>Calculs</h2><div class="card"><div class="fl"><span>Revenu mensuel de référence (€) — optionnel</span><input inputmode="decimal" data-set="revenuRef" value="${num(st.revenuRef)?esc(String(st.revenuRef).replace('.',',')):''}" placeholder="Auto (revenus récurrents)"><small>Sert au taux d'endettement. Vide = somme de tes revenus récurrents.</small></div></div>`;
+  h+=`<h2>Calculs</h2><div class="card"><label class="colrow"><span>Compter les budgets comme dépensés dans les mois à venir</span><input type="checkbox" data-set="projBudgets" ${st.projBudgets!==false?'checked':''}></label><small style="margin-bottom:10px">Le mois en cours n'est jamais concerné : seules tes dépenses saisies y comptent. Ce qui n'est pas dépensé, c'est du bonus.</small><div class="fl"><span>Revenu mensuel de référence (€) — optionnel</span><input inputmode="decimal" data-set="revenuRef" value="${num(st.revenuRef)?esc(String(st.revenuRef).replace('.',',')):''}" placeholder="Auto (revenus récurrents)"><small>Sert au taux d'endettement. Vide = somme de tes revenus récurrents.</small></div></div>`;
   const snaps=S.snapshots.slice().sort((a,b)=>a.date<b.date?1:-1);
   h+=`<h2>Historique des soldes saisis</h2><div class="list">${snaps.slice(0,24).map(s=>{const tot=Object.values(s.values||{}).reduce((t,v)=>t+num(v),0);const ecart=s.expected?tot-Object.values(s.expected).reduce((t,v)=>t+num(v),0):null;
     return `<div class="row"><div class="grow"><div class="t">${fmtDL(s.date)}</div><div class="s">Total ${money(tot)}${ecart!==null?' · écart avec le prévu '+money(ecart,true):''}</div></div><button class="btn ghost sm" data-act="snap-del" data-id="${s.id}">Supprimer</button></div>`}).join('')||'<div class="empty">Aucun solde saisi.</div>'}</div>`;
@@ -822,7 +832,7 @@ function saveBalances(mode){
 function editAccount(id){
   const a=id?S.accounts.find(x=>x.id===id):{name:'',subs:[]};if(!a)return;
   const subRow=s=>`<div class="subrow" data-sid="${s.id}"><input value="${esc(s.name)}" placeholder="Nom du sous-compte"><button type="button" class="btn ghost sm" data-act="sub-del">✕</button></div>`;
-  sheet(`<h3>${id?'Modifier le compte':'Nouveau compte'}</h3><div class="fl"><span>Nom du compte</span><input id="a_name" value="${esc(a.name)}" placeholder="Ex : Compte joint Sumeria"></div>
+  sheet(`<h3>${id?'Modifier le compte':'Nouveau compte'}</h3><div class="fl"><span>Nom du compte</span><input id="a_name" value="${esc(a.name)}" placeholder="Ex : Compte joint Sumeria"></div><label class="colrow"><span>Alimenté à la demande (pas de projection)</span><input type="checkbox" id="a_topup" ${a.topup?'checked':''}></label><small>Pour un compte que tu renfloues selon les besoins : l'appli affiche son solde du jour, sans point bas, sans alerte ni projection. Ses prélèvements restent comptés dans la vue Globale.</small>
   <div class="fl"><span>Sous-comptes (cagnottes, onglets…)</span><div id="subs">${(a.subs||[]).map(subRow).join('')}</div><button type="button" class="btn ghost sm" data-act="sub-add">+ Ajouter un sous-compte</button><small>Ex : Nourriture, Voyage, Loisirs. Le solde du compte = principal + sous-comptes.</small></div>
   <div class="btns"><button class="btn" data-act="acc-save" data-id="${id||''}">Enregistrer</button>${id?`<button class="btn danger" data-act="acc-del" data-id="${id}">Supprimer</button>`:''}<button class="btn ghost" data-act="close">Annuler</button></div>`);
 }
@@ -835,8 +845,8 @@ function rekey(oldK,newK){
 function saveAccount(id){
   const name=document.getElementById('a_name').value.trim();if(!name){toast('Donne un nom au compte');return}
   const subs=[...document.querySelectorAll('#subs .subrow')].map(r=>({id:r.dataset.sid,name:r.querySelector('input').value.trim()})).filter(s=>s.name);
-  if(id){const a=S.accounts.find(x=>x.id===id);const keep=new Set(subs.map(s=>s.id));(a.subs||[]).forEach(s=>{if(!keep.has(s.id))rekey(id+'/'+s.id,id)});a.name=name;a.subs=subs}
-  else S.accounts.push({id:uid(),name,subs});
+  if(id){const a=S.accounts.find(x=>x.id===id);const keep=new Set(subs.map(s=>s.id));(a.subs||[]).forEach(s=>{if(!keep.has(s.id))rekey(id+'/'+s.id,id)});a.name=name;a.subs=subs;a.topup=document.getElementById('a_topup').checked}
+  else S.accounts.push({id:uid(),name,subs,topup:document.getElementById('a_topup').checked});
   commit();closeSheet();toast('Compte enregistré');
 }
 function deleteAccount(id){
